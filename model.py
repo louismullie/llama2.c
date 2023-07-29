@@ -21,7 +21,6 @@ class ModelArgs:
     max_seq_len: int = 2048
     dropout: float = 0.0
 
-
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float):
         super().__init__()
@@ -35,33 +34,45 @@ class RMSNorm(torch.nn.Module):
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
-
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
+    return torch.stack([torch.cos(freqs), torch.sin(freqs)], -1)
 
-
-def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
+def reshape_for_broadcast(freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
-
+    assert freqs_cos.shape == freqs_sin.shape == (x.shape[1], x.shape[-1] // 2)
+    shape = [1] * ndim
+    shape[1] = x.shape[1]
+    shape[-1] = x.shape[-1] // 2
+    return freqs_cos.view(*shape), freqs_sin.view(*shape)
 
 def apply_rotary_emb(
     xq: torch.Tensor,
     xk: torch.Tensor,
-    freqs_cis: torch.Tensor,
+    freqs: Tuple[torch.Tensor, torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    freqs_cis = reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
+
+    freqs_cos, freqs_sin = freqs[..., 0], freqs[..., 1]
+    freqs_cos, freqs_sin = reshape_for_broadcast(freqs_cos, freqs_sin, xq)
+
+    xq = xq.view(*xq.shape[:-1], -1, 2)
+    xk = xk.view(*xk.shape[:-1], -1, 2)
+
+    xq_r, xq_i = xq[..., 0], xq[..., 1]
+    xk_r, xk_i = xk[..., 0], xk[..., 1]
+
+    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin 
+    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
+
+    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin 
+    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
+
+    xq_out = torch.stack((xq_out_r, xq_out_i), dim=-1).flatten(-2)
+    xk_out = torch.stack((xk_out_r, xk_out_i), dim=-1).flatten(-2)
+
     return xq_out.type_as(xq), xk_out.type_as(xk)
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -359,8 +370,8 @@ class Transformer(nn.Module):
         serialize(self.norm.weight)
         # note: no need to write final classifier weights due to weight sharing
         # freqs_cis
-        serialize(self.freqs_cis.real[:p.max_seq_len])
-        serialize(self.freqs_cis.imag[:p.max_seq_len])
+        serialize(self.freqs_cis[..., 0][:p.max_seq_len])
+        serialize(self.freqs_cis[..., 1][:p.max_seq_len])
 
         # write to binary file
         f.close()

@@ -18,6 +18,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 
 import math
 import os
+import platform
 import time
 from contextlib import nullcontext
 from datetime import datetime
@@ -30,10 +31,29 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 from tinystories import Task
 
+def detect_device():
+    if torch.cuda.is_available():
+        print("CUDA is available. Setting as default device.")
+        return 'cuda'
+    if platform.system() != 'Darwin':
+        print("No GPU available. Defaulting to CPU.")
+        return 'cpu'
+    if torch.backends.mps.is_available():
+        print("MPS is available. Setting as default device.")
+        return 'mps'
+    if not torch.backends.mps.is_built():
+        print("MPS not available because the current PyTorch install was not "
+            "built with MPS enabled. Defaulting to CPU.")
+        return 'cpu'
+    else:
+        print("MPS not available because the current MacOS version is not 12.3+ "
+            "and/or you do not have an MPS-enabled device. Defaulting to CPU.")
+        return 'cpu'
+
 # -----------------------------------------------------------------------------
 # I/O
 out_dir = "out"
-eval_interval = 2000
+eval_interval = 10
 log_interval = 1
 eval_iters = 100
 eval_only = False  # if True, script exits right after the first eval
@@ -45,13 +65,13 @@ wandb_project = "llamac"
 wandb_run_name = "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 # data
 batch_size = 128  # if gradient_accumulation_steps > 1, this is the micro-batch size
-max_seq_len = 256
+max_seq_len = 1024
 # model
-dim = 288
-n_layers = 6
-n_heads = 6
+dim = 768
+n_layers = 12
+n_heads = 12
 multiple_of = 32
-dropout = 0.0
+dropout = 0.05
 # adamw optimizer
 gradient_accumulation_steps = 4  # used to simulate larger batch sizes
 learning_rate = 5e-4  # max learning rate
@@ -64,7 +84,9 @@ grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
 decay_lr = True  # whether to decay the learning rate
 warmup_iters = 1000  # how many steps to warm up for
 # system
-device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device = detect_device() # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+if device == 'mps': os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+
 dtype = "bfloat16"  # float32|bfloat16|float16
 compile = True  # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -88,8 +110,14 @@ if ddp:
     ddp_rank = int(os.environ["RANK"])
     ddp_local_rank = int(os.environ["LOCAL_RANK"])
     ddp_world_size = int(os.environ["WORLD_SIZE"])
-    device = f"cuda:{ddp_local_rank}"
-    torch.cuda.set_device(device)
+    if "cuda" in device:
+        device = f"cuda:{ddp_local_rank}"
+        torch.cuda.set_device(device)
+    elif "mps" in device:
+        device = f"mps:{ddp_local_rank}"
+        torch.mps.set_device(device)
+    else:
+        raise ValueError(f"Invalid device: {device}")
     master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
     seed_offset = ddp_rank  # each process gets a different seed
     # world_size number of processes will be training simultaneously, so we can scale
@@ -111,12 +139,12 @@ if master_process:
 torch.manual_seed(1337 + seed_offset)
 torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
 torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
-device_type = "cuda" if "cuda" in device else "cpu"  # for later use in torch.autocast
+device_type = "cuda" if "cuda" in device else ("mps" if "mps" in device else "cpu")  # for later use in torch.autocast
 # note: float16 data type will automatically use a GradScaler
 ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[dtype]
 ctx = (
     nullcontext()
-    if device_type == "cpu"
+    if device_type in ["cpu", "mps"]
     else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 )
 

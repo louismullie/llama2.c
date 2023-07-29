@@ -29,7 +29,7 @@ def test_argmax_inference():
     #print(c_tokens)
 
     # run PyTorch version
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = 'cuda' if torch.backend.cuda.is_available() else ("mps" if torch.backend.mps.is_available() else "cpu")
     ckpt_path = os.path.join(test_ckpt_dir, "ckpt.pt")
     checkpoint = torch.load(ckpt_path, map_location=device)
     gptconf = ModelArgs(**checkpoint['model_args'])
