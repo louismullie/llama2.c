@@ -25,6 +25,8 @@ from datetime import datetime
 from functools import partial
 
 import torch
+import logging
+
 from model import Transformer, ModelArgs
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -40,6 +42,8 @@ def detect_device():
         return 'cpu'
     if torch.backends.mps.is_available():
         print("MPS is available. Setting as default device.")
+        print("NB: Suppressing torch._dynamo warnings.")
+        torch._logging.set_logs(dynamo=logging.ERROR)
         return 'mps'
     if not torch.backends.mps.is_built():
         print("MPS not available because the current PyTorch install was not "
@@ -64,7 +68,7 @@ wandb_log = False  # disabled by default
 wandb_project = "llamac"
 wandb_run_name = "run" + datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 # data
-batch_size = 128  # if gradient_accumulation_steps > 1, this is the micro-batch size
+batch_size = 32  # if gradient_accumulation_steps > 1, this is the micro-batch size
 max_seq_len = 1024
 # model
 dim = 768
